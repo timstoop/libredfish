@@ -69,13 +69,130 @@ use crate::{
     Status, StatusInternal, SystemPowerControl,
 };
 
-/// AMI uses BIOS attribute SETUP001 for Administrator Password (UEFI password)
-const UEFI_PASSWORD_NAME: &str = "SETUP001";
+/// Giga Computing platforms whose BIOS attribute names differ.
+///
+/// The R263-ZG0 (BIOS R23_F20) uses bare codes such as `TER001`. The G894
+/// HGX B300 (BIOS F10) appends the display name (`TER001_ConsoleRedirection`),
+/// uses other codes for some settings (`BirchStream0011_VMX`,
+/// `PCID002_SRIOVSupport`, `GBT0248_EndlessRetryBoot`) and `Enable`/`Disable`
+/// instead of `Enabled`/`Disabled` for some of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Platform {
+    R263,
+    G894,
+}
 
-/// Giga Computing exposes infinite boot as the vendor-coded BIOS attribute
-/// GBT0183 ("Endless Retry Boot", MenuPath ./Boot) instead of AMI's generic
-/// "EndlessBoot", which this BIOS does not define.
-const INFINITE_BOOT_NAME: &str = "GBT0183";
+impl Platform {
+    /// Picks the attribute set from the ComputerSystem `Model`. Anything that
+    /// is not a G894 keeps the R263-ZG0 names.
+    fn from_model(model: Option<&str>) -> Self {
+        match model {
+            Some(m) if m.trim().starts_with("G894") => Platform::G894,
+            _ => Platform::R263,
+        }
+    }
+
+    /// BIOS attribute that holds the Administrator Password (UEFI password).
+    fn uefi_password_name(self) -> &'static str {
+        match self {
+            Platform::R263 => "SETUP001",
+            Platform::G894 => "SETUP001_AdministratorPassword",
+        }
+    }
+
+    /// Infinite boot is the vendor-coded "Endless Retry Boot" attribute
+    /// (MenuPath ./Boot) instead of AMI's generic "EndlessBoot", which these
+    /// BIOSes do not define. Returns the key and its "on" value.
+    fn infinite_boot(self) -> (&'static str, &'static str) {
+        match self {
+            Platform::R263 => ("GBT0183", "Enabled"),
+            Platform::G894 => ("GBT0248_EndlessRetryBoot", "Enable"),
+        }
+    }
+
+    /// Serial console attributes: (key, value when enabled, value when
+    /// disabled or "any").
+    fn serial_console_attrs(self) -> [(&'static str, &'static str, &'static str); 8] {
+        match self {
+            Platform::R263 => [
+                ("TER001", "Enabled", "Disabled"), // Console Redirection
+                ("TER010", "Enabled", "Disabled"), // Console Redirection EMS
+                ("TER06B", "COM1/SOL", "any"),     // Out-of-Band Mgmt Port
+                ("TER021", "115200", "any"),       // Bits per second
+                ("TER020", "115200", "any"),       // Bits per second EMS
+                ("TER012", "VT100Plus", "any"),    // Terminal Type
+                ("TER011", "VT-UTF8", "any"),      // Terminal Type EMS
+                ("TER05D", "None", "any"),         // Flow Control
+            ],
+            Platform::G894 => [
+                ("TER001_ConsoleRedirection", "Enabled", "Disabled"),
+                ("TER010_ConsoleRedirectionEMS", "Enabled", "Disabled"),
+                // COM1 is the only allowed value on this BIOS.
+                ("TER06B_OutofBandMgmtPort", "COM1", "any"),
+                ("TER0021_Bitspersecond", "115200", "any"),
+                ("TER0020_BitspersecondEMS", "115200", "any"),
+                ("TER012_TerminalType", "VT100Plus", "any"),
+                ("TER011_TerminalTypeEMS", "VT-UTF8", "any"),
+                ("TER05D_FlowControl", "None", "any"),
+            ],
+        }
+    }
+
+    /// Pending-operation attributes that accept "TPM Clear".
+    ///
+    /// On the R263-ZG0, TCG006 is "TCM State", and the slot that accepts
+    /// "TPM Clear" is TCG008. The G894 BIOS has two "Pending operation"
+    /// attributes under ./Advanced/Trusted Computing (TCG006 and TCG007) and
+    /// does not say which device each belongs to, so both are set.
+    fn tpm_clear_keys(self) -> &'static [&'static str] {
+        match self {
+            Platform::R263 => &["TCG008"],
+            Platform::G894 => &["TCG006_Pendingoperation", "TCG007_Pendingoperation"],
+        }
+    }
+
+    /// "Reset NVRAM" attribute. The G894 BIOS has none.
+    fn reset_nvram_key(self) -> Option<&'static str> {
+        match self {
+            Platform::R263 => Some("RECV000"),
+            Platform::G894 => None,
+        }
+    }
+
+    /// BIOS attributes for machine setup.
+    //
+    // Dropped vs. ami::machine_setup_attrs (keys absent on Giga Computing R263-ZG0):
+    //   LEM0001     - PXE retry count; no LEM* keys on this BMC
+    //   FBO001      - Boot Mode Select; platform appears UEFI-only (only FBO201-205 UEFI entries exist)
+    //   EndlessBoot - Infinite Boot; see Platform::infinite_boot
+    fn machine_setup_attrs(self) -> HashMap<String, serde_json::Value> {
+        let attrs = match self {
+            Platform::R263 => [
+                ("CPU005", "Enabled"),   // Enable/disable CPU Virtualization
+                ("PCIS007", "Enabled"),  // SR-IOV Support
+                ("NWSK000", "Enabled"),  // Network Stack
+                ("NWSK001", "Disabled"), // IPv4 PXE Support
+                ("NWSK006", "Enabled"),  // IPv4 HTTP Support
+                ("NWSK002", "Disabled"), // IPv6 PXE Support
+                ("NWSK007", "Disabled"), // IPv6 HTTP Support
+            ],
+            Platform::G894 => [
+                ("BirchStream0011_VMX", "Enable"),
+                ("PCID002_SRIOVSupport", "Enabled"),
+                ("NWSK000_NetworkStack", "Enabled"),
+                ("NWSK001_IPv4PXESupport", "Disabled"),
+                ("NWSK006_IPv4HTTPSupport", "Enabled"),
+                ("NWSK002_IPv6PXESupport", "Disabled"),
+                ("NWSK007_IPv6HTTPSupport", "Disabled"),
+            ],
+        };
+        attrs
+            .into_iter()
+            .chain([self.infinite_boot()])
+            .map(|(k, v)| (k.to_string(), v.into()))
+            .collect()
+    }
+}
 
 /// Giga Computing R263-ZG0 exposes exactly one host interface, at a fixed path.
 const HOST_INTERFACE_URL: &str = "Managers/Self/HostInterfaces/Self";
@@ -166,11 +283,16 @@ fn lockdown_verdict(hi: &HostInterface) -> Status {
 
 pub struct Bmc {
     s: RedfishStandard,
+    platform: Platform,
 }
 
 impl Bmc {
-    pub fn new(s: RedfishStandard) -> Result<Bmc, RedfishError> {
-        Ok(Bmc { s })
+    /// Client with the BIOS attribute names for this ComputerSystem `Model`.
+    pub fn with_model(s: RedfishStandard, model: Option<&str>) -> Result<Bmc, RedfishError> {
+        Ok(Bmc {
+            s,
+            platform: Platform::from_model(model),
+        })
     }
 }
 
@@ -443,7 +565,7 @@ impl Redfish for Bmc {
         Box::pin(async move {
             self.setup_serial_console().await?;
             self.clear_tpm().await?;
-            let attrs = self.machine_setup_attrs();
+            let attrs = self.platform.machine_setup_attrs();
             self.set_bios(attrs).await?;
             Ok(None)
         })
@@ -595,18 +717,12 @@ impl Redfish for Bmc {
     /// Setup serial console for AMI BMC via BIOS attributes.
     fn setup_serial_console<'a>(&'a self) -> crate::RedfishFuture<'a, Result<(), RedfishError>> {
         Box::pin(async move {
-            use serde_json::Value;
-
-            let attributes: HashMap<String, Value> = HashMap::from([
-                ("TER001".to_string(), "Enabled".into()), // Console Redirection
-                ("TER010".to_string(), "Enabled".into()), // Console Redirection EMS
-                ("TER06B".to_string(), "COM1/SOL".into()), // Out-of-Band Mgmt Port
-                ("TER021".to_string(), "115200".into()),  // Bits per second
-                ("TER020".to_string(), "115200".into()),  // Bits per second EMS
-                ("TER012".to_string(), "VT100Plus".into()), // Terminal Type
-                ("TER011".to_string(), "VT-UTF8".into()), // Terminal Type EMS
-                ("TER05D".to_string(), "None".into()),    // Flow Control
-            ]);
+            let attributes: HashMap<String, serde_json::Value> = self
+                .platform
+                .serial_console_attrs()
+                .into_iter()
+                .map(|(key, enabled, _)| (key.to_string(), enabled.into()))
+                .collect();
 
             self.set_bios(attributes).await
         })
@@ -621,30 +737,25 @@ impl Redfish for Bmc {
             let url = format!("Systems/{}/Bios", self.s.system_id());
             let attrs = jsonmap::get_object(&bios, "Attributes", &url)?;
 
-            let expected = vec![
-                ("TER001", "Enabled", "Disabled"),
-                ("TER010", "Enabled", "Disabled"),
-                ("TER06B", "COM1/SOL", "any"),
-                ("TER021", "115200", "any"),
-                ("TER020", "115200", "any"),
-                ("TER012", "VT100Plus", "any"),
-                ("TER011", "VT-UTF8", "any"),
-                ("TER05D", "None", "any"),
-            ];
+            let expected = self.platform.serial_console_attrs();
 
             let mut message = String::new();
             let mut enabled = true;
             let mut disabled = true;
 
             for (key, val_enabled, val_disabled) in expected {
-                if let Some(val_current) = attrs.get(key).and_then(|v| v.as_str()) {
-                    message.push_str(&format!("{key}={val_current} "));
-                    if val_current != val_enabled {
-                        enabled = false;
-                    }
-                    if val_current != val_disabled && val_disabled != "any" {
-                        disabled = false;
-                    }
+                let Some(val_current) = attrs.get(key).and_then(|v| v.as_str()) else {
+                    // A key this BIOS does not define cannot count as enabled.
+                    message.push_str(&format!("{key}=_missing_ "));
+                    enabled = false;
+                    continue;
+                };
+                message.push_str(&format!("{key}={val_current} "));
+                if val_current != val_enabled {
+                    enabled = false;
+                }
+                if val_current != val_disabled && val_disabled != "any" {
+                    disabled = false;
                 }
             }
 
@@ -763,10 +874,13 @@ impl Redfish for Bmc {
 
     fn clear_tpm<'a>(&'a self) -> crate::RedfishFuture<'a, Result<(), RedfishError>> {
         Box::pin(async move {
-            // Giga R263-ZG0: TCG006 is "TCM State" (Disabled/Enabled), not TPM.
-            // The pending-operation slot that accepts "TPM Clear" is TCG008.
-            self.set_bios(HashMap::from([("TCG008".to_string(), "TPM Clear".into())]))
-                .await
+            let attrs = self
+                .platform
+                .tpm_clear_keys()
+                .iter()
+                .map(|key| (key.to_string(), "TPM Clear".into()))
+                .collect();
+            self.set_bios(attrs).await
         })
     }
 
@@ -828,8 +942,22 @@ impl Redfish for Bmc {
         })
     }
 
+    /// The G894 BMC declares `ResetType` required on `Bios.ResetBios`
+    /// (ResetBiosActionInfo: allowed value `Reset`), so it gets that body.
     fn reset_bios<'a>(&'a self) -> crate::RedfishFuture<'a, Result<(), RedfishError>> {
-        Box::pin(async move { self.s.factory_reset_bios().await })
+        Box::pin(async move {
+            match self.platform {
+                Platform::G894 => {
+                    let url = format!("Systems/{}/Bios/Actions/Bios.ResetBios", self.s.system_id());
+                    self.s
+                        .client
+                        .post(&url, HashMap::from([("ResetType", "Reset")]))
+                        .await
+                        .map(|_| ())
+                }
+                Platform::R263 => self.s.factory_reset_bios().await,
+            }
+        })
     }
 
     /// AMI uses /Bios/SD for pending settings
@@ -985,7 +1113,11 @@ impl Redfish for Bmc {
     ) -> crate::RedfishFuture<'a, Result<Option<String>, RedfishError>> {
         Box::pin(async move {
             self.s
-                .change_bios_password(UEFI_PASSWORD_NAME, current_uefi_password, new_uefi_password)
+                .change_bios_password(
+                    self.platform.uefi_password_name(),
+                    current_uefi_password,
+                    new_uefi_password,
+                )
                 .await
         })
     }
@@ -1127,10 +1259,16 @@ impl Redfish for Bmc {
         Box::pin(async move { self.s.enable_rshim_bmc().await })
     }
 
-    /// AMI clear_nvram - sets RECV000 (Reset NVRAM) to "Enabled"
+    /// AMI clear_nvram - sets the "Reset NVRAM" attribute to "Enabled"
     fn clear_nvram<'a>(&'a self) -> crate::RedfishFuture<'a, Result<(), RedfishError>> {
         Box::pin(async move {
-            self.set_bios(HashMap::from([("RECV000".to_string(), "Enabled".into())]))
+            let Some(key) = self.platform.reset_nvram_key() else {
+                return Err(RedfishError::NotSupported(format!(
+                    "clear_nvram: no Reset NVRAM BIOS attribute on {:?}",
+                    self.platform
+                )));
+            };
+            self.set_bios(HashMap::from([(key.to_string(), "Enabled".into())]))
                 .await
         })
     }
@@ -1150,11 +1288,9 @@ impl Redfish for Bmc {
 
     fn enable_infinite_boot<'a>(&'a self) -> crate::RedfishFuture<'a, Result<(), RedfishError>> {
         Box::pin(async move {
-            self.set_bios(HashMap::from([(
-                INFINITE_BOOT_NAME.to_string(),
-                "Enabled".into(),
-            )]))
-            .await
+            let (key, on) = self.platform.infinite_boot();
+            self.set_bios(HashMap::from([(key.to_string(), on.into())]))
+                .await
         })
     }
 
@@ -1167,10 +1303,11 @@ impl Redfish for Bmc {
             let attrs = jsonmap::get_object(&bios, "Attributes", &url)?;
             // Absent on BIOS revisions that don't define it; report unknown
             // rather than failing the whole readout.
-            let Some(endless_boot) = attrs.get(INFINITE_BOOT_NAME).and_then(|v| v.as_str()) else {
+            let (key, on) = self.platform.infinite_boot();
+            let Some(endless_boot) = attrs.get(key).and_then(|v| v.as_str()) else {
                 return Ok(None);
             };
-            Ok(Some(endless_boot == "Enabled"))
+            Ok(Some(endless_boot == on))
         })
     }
 
@@ -1413,25 +1550,6 @@ impl Bmc {
         Ok((expected_first_boot_option, actual_first_boot_option))
     }
 
-    /// Get the BIOS attributes for machine setup.
-    //
-    // Dropped vs. ami::machine_setup_attrs (keys absent on Giga Computing R263-ZG0):
-    //   LEM0001     — PXE retry count; no LEM* keys on this BMC
-    //   FBO001      — Boot Mode Select; platform appears UEFI-only (only FBO201–205 UEFI entries exist)
-    //   EndlessBoot — Infinite Boot; spelled GBT0183 on this BIOS (see INFINITE_BOOT_NAME)
-    fn machine_setup_attrs(&self) -> HashMap<String, serde_json::Value> {
-        HashMap::from([
-            ("CPU005".to_string(), "Enabled".into()), // Enable/disable CPU Virtualization
-            ("PCIS007".to_string(), "Enabled".into()), // SR-IOV Support
-            ("NWSK000".to_string(), "Enabled".into()), // Network Stack
-            ("NWSK001".to_string(), "Disabled".into()), // IPv4 PXE Support
-            ("NWSK006".to_string(), "Enabled".into()), // IPv4 HTTP Support
-            ("NWSK002".to_string(), "Disabled".into()), // IPv6 PXE Support
-            ("NWSK007".to_string(), "Disabled".into()), // IPv6 HTTP Support
-            (INFINITE_BOOT_NAME.to_string(), "Enabled".into()), // Infinite Boot
-        ])
-    }
-
     /// Check BIOS/BMC attributes against expected values for machine setup status.
     async fn diff_bios_bmc_attr(&self) -> Result<Vec<MachineSetupDiff>, RedfishError> {
         let mut diffs = vec![];
@@ -1448,7 +1566,7 @@ impl Bmc {
 
         // Check BIOS attributes
         let bios = self.s.bios_attributes().await?;
-        let expected_attrs = self.machine_setup_attrs();
+        let expected_attrs = self.platform.machine_setup_attrs();
 
         for (key, expected) in expected_attrs {
             let Some(actual) = bios.get(&key) else {
@@ -1474,5 +1592,105 @@ impl Bmc {
         }
 
         Ok(diffs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn platform_from_model() {
+        assert_eq!(
+            Platform::from_model(Some("G894-SD3-AAX7-000")),
+            Platform::G894
+        );
+        assert_eq!(
+            Platform::from_model(Some("R263-ZG0-AAL2-000")),
+            Platform::R263
+        );
+        assert_eq!(Platform::from_model(Some("")), Platform::R263);
+        assert_eq!(Platform::from_model(None), Platform::R263);
+    }
+
+    #[test]
+    fn r263_machine_setup_attrs_unchanged() {
+        let attrs = Platform::R263.machine_setup_attrs();
+        assert_eq!(attrs.len(), 8);
+        assert_eq!(attrs["CPU005"], "Enabled");
+        assert_eq!(attrs["NWSK001"], "Disabled");
+        assert_eq!(attrs["GBT0183"], "Enabled");
+    }
+
+    #[test]
+    fn g894_machine_setup_attrs() {
+        let attrs = Platform::G894.machine_setup_attrs();
+        assert_eq!(attrs.len(), 8);
+        assert_eq!(attrs["BirchStream0011_VMX"], "Enable");
+        assert_eq!(attrs["PCID002_SRIOVSupport"], "Enabled");
+        assert_eq!(attrs["NWSK001_IPv4PXESupport"], "Disabled");
+        assert_eq!(attrs["NWSK006_IPv4HTTPSupport"], "Enabled");
+        assert_eq!(attrs["GBT0248_EndlessRetryBoot"], "Enable");
+    }
+
+    #[test]
+    fn g894_serial_console_and_other_keys() {
+        let keys: Vec<_> = Platform::G894
+            .serial_console_attrs()
+            .iter()
+            .map(|(k, _, _)| *k)
+            .collect();
+        assert!(keys.contains(&"TER001_ConsoleRedirection"));
+        assert!(keys.contains(&"TER0021_Bitspersecond"));
+        assert!(Platform::G894.serial_console_attrs().contains(&(
+            "TER06B_OutofBandMgmtPort",
+            "COM1",
+            "any"
+        )));
+        assert_eq!(
+            Platform::G894.uefi_password_name(),
+            "SETUP001_AdministratorPassword"
+        );
+        assert_eq!(Platform::G894.reset_nvram_key(), None);
+        assert_eq!(Platform::R263.tpm_clear_keys(), &["TCG008"]);
+    }
+
+    /// Every G894 key and value exists in the BIOS F10 attribute registry.
+    #[test]
+    fn g894_keys_match_registry() {
+        let registry: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/data/g894-bios-f10-registry-subset.json"
+        ))
+        .unwrap();
+        let allowed = |key: &str| -> Vec<String> {
+            registry[key]
+                .as_array()
+                .unwrap_or_else(|| panic!("{key} not in registry"))
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        };
+        let p = Platform::G894;
+        for (key, value) in p.machine_setup_attrs() {
+            assert!(
+                allowed(&key).contains(&value.as_str().unwrap().to_string()),
+                "{key}"
+            );
+        }
+        for (key, enabled, disabled) in p.serial_console_attrs() {
+            let values = allowed(key);
+            assert!(
+                values.is_empty() || values.contains(&enabled.to_string()),
+                "{key}"
+            );
+            assert!(
+                disabled == "any" || values.contains(&disabled.to_string()),
+                "{key}"
+            );
+        }
+        for key in p.tpm_clear_keys() {
+            assert!(allowed(key).contains(&"TPM Clear".to_string()), "{key}");
+        }
+        allowed(p.uefi_password_name());
     }
 }

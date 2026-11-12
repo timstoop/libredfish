@@ -1,0 +1,83 @@
+{
+  "BirchStream0011_VMX": [
+    "Disable",
+    "Enable"
+  ],
+  "GBT0248_EndlessRetryBoot": [
+    "Disable",
+    "Enable"
+  ],
+  "NWSK000_NetworkStack": [
+    "Disabled",
+    "Enabled"
+  ],
+  "NWSK001_IPv4PXESupport": [
+    "Disabled",
+    "Enabled"
+  ],
+  "NWSK002_IPv6PXESupport": [
+    "Disabled",
+    "Enabled"
+  ],
+  "NWSK006_IPv4HTTPSupport": [
+    "Disabled",
+    "Enabled"
+  ],
+  "NWSK007_IPv6HTTPSupport": [
+    "Disabled",
+    "Enabled"
+  ],
+  "PCID002_SRIOVSupport": [
+    "Disabled",
+    "Enabled"
+  ],
+  "SETUP001_AdministratorPassword": [],
+  "TCG006_Pendingoperation": [
+    "None",
+    "TPM Clear"
+  ],
+  "TCG007_Pendingoperation": [
+    "None",
+    "TPM Clear"
+  ],
+  "TER001_ConsoleRedirection": [
+    "Disabled",
+    "Enabled"
+  ],
+  "TER0020_BitspersecondEMS": [
+    "9600",
+    "19200",
+    "57600",
+    "115200"
+  ],
+  "TER0021_Bitspersecond": [
+    "9600",
+    "19200",
+    "38400",
+    "57600",
+    "115200"
+  ],
+  "TER010_ConsoleRedirectionEMS": [
+    "Disabled",
+    "Enabled"
+  ],
+  "TER011_TerminalTypeEMS": [
+    "VT100",
+    "VT100Plus",
+    "VT-UTF8",
+    "ANSI"
+  ],
+  "TER012_TerminalType": [
+    "VT100",
+    "VT100Plus",
+    "VT-UTF8",
+    "ANSI"
+  ],
+  "TER05D_FlowControl": [
+    "None",
+    "Hardware RTS/CTS"
+  ],
+  "TER06B_OutofBandMgmtPort": [
+    "COM1"
+  ]
+}
