@@ -342,6 +342,25 @@ impl RedfishClientPool {
                     break;
                 }
             }
+            // A Giga Computing G894 lists the GPU baseboard (`HGX_Baseboard_0`)
+            // ahead of the host (`Self`), and the host has no Bios link while it
+            // is off and for a few minutes after power on. Falling back to the
+            // first member would then target the baseboard, so pick the G894
+            // host system instead.
+            if system_with_bios.is_none() {
+                for id in &systems {
+                    if let Ok((_, cs)) = s
+                        .client
+                        .get::<ComputerSystem>(&format!("Systems/{id}"))
+                        .await
+                    {
+                        if is_g894_host(&cs) {
+                            system_with_bios = Some(cs);
+                            break;
+                        }
+                    }
+                }
+            }
             let manager_from_system = system_with_bios
                 .as_ref()
                 .and_then(|swb| swb.links.as_ref())
@@ -1017,6 +1036,18 @@ impl RedfishHttpClient {
 
 /// Order system ids for the Bios probe: preferred host first, then the remaining
 /// members in enumeration order (skipping the preferred id so it is not probed twice).
+/// The host system of a Giga Computing G894 (HGX B300), as opposed to its GPU
+/// baseboard system.
+fn is_g894_host(cs: &ComputerSystem) -> bool {
+    cs.manufacturer
+        .as_deref()
+        .is_some_and(|m| m.eq_ignore_ascii_case("Giga Computing"))
+        && cs
+            .model
+            .as_deref()
+            .is_some_and(|m| m.trim().starts_with("G894"))
+}
+
 fn system_ids_for_bios_probe<'a>(
     preferred: &'a str,
     systems: &'a [String],
@@ -1083,6 +1114,22 @@ fn redact_sensitive_fields(body: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn g894_host_is_not_the_gpu_baseboard() {
+        let system = |manufacturer: &str, model: &str| ComputerSystem {
+            manufacturer: Some(manufacturer.to_string()),
+            model: Some(model.to_string()),
+            ..Default::default()
+        };
+        assert!(is_g894_host(&system("Giga Computing", "G894-SD3-AAX7-000")));
+        assert!(!is_g894_host(&system("NVIDIA", "NA")));
+        assert!(!is_g894_host(&system(
+            "Giga Computing",
+            "R263-ZG0-AAL2-000"
+        )));
+        assert!(!is_g894_host(&ComputerSystem::default()));
+    }
 
     #[test]
     fn test_truncate() {
