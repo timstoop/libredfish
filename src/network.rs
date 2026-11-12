@@ -408,31 +408,20 @@ impl RedfishClientPool {
             return Ok(RedfishVendor::AMI);
         }
 
-        let mut is_lenovo = false;
-        let mut is_gb300 = false;
+        let mut systems = Vec::new();
         for id in s.get_systems().await? {
-            let (_, system): (_, ComputerSystem) = s.client.get(&format!("Systems/{id}")).await?;
-            if system
-                .manufacturer
-                .as_deref()
-                .unwrap_or_default()
-                .contains("Lenovo")
-            {
-                is_lenovo = true;
-            }
-            if system
-                .model
-                .as_deref()
-                .unwrap_or_default()
-                .contains("GB300")
-            {
-                is_gb300 = true;
-            }
-            if is_lenovo && is_gb300 {
-                return Ok(RedfishVendor::LenovoGB300);
-            }
+            systems.push(
+                s.client
+                    .get::<ComputerSystem>(&format!("Systems/{id}"))
+                    .await
+                    .map(|(_, system)| system),
+            );
         }
-        Ok(RedfishVendor::AMI)
+        Ok(if is_lenovo_gb300(systems) {
+            RedfishVendor::LenovoGB300
+        } else {
+            RedfishVendor::AMI
+        })
     }
 
     /// Creates a Redfish BMC client for a certain endpoint
@@ -1034,8 +1023,6 @@ impl RedfishHttpClient {
     }
 }
 
-/// Order system ids for the Bios probe: preferred host first, then the remaining
-/// members in enumeration order (skipping the preferred id so it is not probed twice).
 /// The host system of a Giga Computing G894 (HGX B300), as opposed to its GPU
 /// baseboard system.
 fn is_g894_host(cs: &ComputerSystem) -> bool {
@@ -1048,6 +1035,26 @@ fn is_g894_host(cs: &ComputerSystem) -> bool {
             .is_some_and(|m| m.trim().starts_with("G894"))
 }
 
+/// A Lenovo GB300 lists a Lenovo system and a GB300 system. A system that could
+/// not be read counts as neither: a Giga Computing G894 answers 500 on
+/// `HGX_Baseboard_0` while the host is off and for minutes after power on, and
+/// failing on that would make every call fail in that window, power on included.
+fn is_lenovo_gb300(systems: Vec<Result<ComputerSystem, RedfishError>>) -> bool {
+    let readable: Vec<ComputerSystem> = systems.into_iter().filter_map(Result::ok).collect();
+    let is_lenovo = readable.iter().any(|s| {
+        s.manufacturer
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Lenovo")
+    });
+    let is_gb300 = readable
+        .iter()
+        .any(|s| s.model.as_deref().unwrap_or_default().contains("GB300"));
+    is_lenovo && is_gb300
+}
+
+/// Order system ids for the Bios probe: preferred host first, then the remaining
+/// members in enumeration order (skipping the preferred id so it is not probed twice).
 fn system_ids_for_bios_probe<'a>(
     preferred: &'a str,
     systems: &'a [String],
@@ -1129,6 +1136,36 @@ mod tests {
             "R263-ZG0-AAL2-000"
         )));
         assert!(!is_g894_host(&ComputerSystem::default()));
+    }
+
+    #[test]
+    fn lenovo_gb300_detection_skips_unreadable_systems() {
+        let system = |manufacturer: &str, model: &str| {
+            Ok(ComputerSystem {
+                manufacturer: Some(manufacturer.to_string()),
+                model: Some(model.to_string()),
+                ..Default::default()
+            })
+        };
+        let unreadable = || {
+            Err(RedfishError::GenericError {
+                error: "HTTP 500 Internal Server Error".to_string(),
+            })
+        };
+        // G894 with the host off: the baseboard answers 500, the host is readable.
+        assert!(!is_lenovo_gb300(vec![
+            unreadable(),
+            system("Giga Computing", "G894-SD3-AAX7-000"),
+        ]));
+        assert!(!is_lenovo_gb300(vec![unreadable(), unreadable()]));
+        assert!(!is_lenovo_gb300(vec![]));
+        assert!(is_lenovo_gb300(vec![
+            system("Lenovo", "SR680a"),
+            unreadable(),
+            system("NVIDIA", "GB300 NVL72"),
+        ]));
+        assert!(is_lenovo_gb300(vec![system("Lenovo", "GB300")]));
+        assert!(!is_lenovo_gb300(vec![system("Lenovo", "SR680a")]));
     }
 
     #[test]
