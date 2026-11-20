@@ -141,13 +141,16 @@ impl Platform {
     /// Pending-operation attributes that accept "TPM Clear".
     ///
     /// On the R263-ZG0, TCG006 is "TCM State", and the slot that accepts
-    /// "TPM Clear" is TCG008. The G894 BIOS has two "Pending operation"
-    /// attributes under ./Advanced/Trusted Computing (TCG006 and TCG007) and
-    /// does not say which device each belongs to, so both are set.
+    /// "TPM Clear" is TCG008. The G894 BIOS (F10, F11) has two "Pending
+    /// operation" attributes under ./Advanced/Trusted Computing. TCG007 is
+    /// the TPM 2.0 one: setting it clears the TPM at the next boot and it
+    /// returns to "None". TCG006 sits with the TPM 1.2/TCM items: on the
+    /// G894's TPM 2.0 it clears nothing and keeps reading "TPM Clear" until
+    /// it is reset, so it is not set.
     fn tpm_clear_keys(self) -> &'static [&'static str] {
         match self {
             Platform::R263 => &["TCG008"],
-            Platform::G894 => &["TCG006_Pendingoperation", "TCG007_Pendingoperation"],
+            Platform::G894 => &["TCG007_Pendingoperation"],
         }
     }
 
@@ -1653,6 +1656,10 @@ mod tests {
         );
         assert_eq!(Platform::G894.reset_nvram_key(), None);
         assert_eq!(Platform::R263.tpm_clear_keys(), &["TCG008"]);
+        assert_eq!(
+            Platform::G894.tpm_clear_keys(),
+            &["TCG007_Pendingoperation"]
+        );
     }
 
     /// Every G894 key and value exists in the BIOS F10 attribute registry.
